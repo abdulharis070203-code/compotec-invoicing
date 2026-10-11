@@ -14,6 +14,10 @@ st.set_page_config(
     layout="centered",
 )
 
+from auth import cek_password, tombol_keluar
+
+cek_password()
+
 st.title("📋 Sistem Invoicing")
 st.caption("PT Compotec International — Divisi Finance")
 
@@ -50,3 +54,5 @@ with st.expander("Urutan kerja yang disarankan"):
     Urutan ini tidak boleh dibalik: tanpa baris dari langkah 1,
     tidak ada yang bisa dicocokkan pada langkah 2.
     """)
+
+tombol_keluar()
