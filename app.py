@@ -23,8 +23,16 @@ st.set_page_config(
 )
 
 from auth import cek_password, tombol_keluar
+from tampilan import pasang_tema, logo_sidebar
 
+# Kunci pintu lebih dulu. Bila belum masuk, fungsi ini menampilkan
+# halaman kata sandi lalu menghentikan eksekusi di sini.
 cek_password()
+
+# Latar belakang terang untuk halaman kerja. Dipasang sebelum menu
+# dijalankan supaya gaya kartu sudah siap saat halaman digambar.
+pasang_tema(halaman_masuk=False)
+logo_sidebar()
 
 menu = st.navigation([
     st.Page("hal_beranda.py",       title="Beranda",       icon="📋", default=True),

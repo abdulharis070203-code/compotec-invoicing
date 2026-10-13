@@ -2,27 +2,31 @@
 
 import streamlit as st
 
-st.title("📋 Sistem Invoicing")
-st.caption("PT Compotec International — Divisi Finance")
+from tampilan import kepala_halaman
 
-st.divider()
+kepala_halaman("Sistem Invoicing", "PT Compotec International — Divisi Finance")
 
 st.subheader("Menu Tersedia")
 
-st.markdown("""
-**📷 Foto Invoice**  
-Unggah foto invoice dari HP atau komputer. Sistem membaca tanggal, supplier,
-nomor invoice, dan nominal secara otomatis. Hasil bacaan ditampilkan lebih
-dulu untuk diperiksa sebelum disimpan.
+st.markdown(
+    """
+    <div class="ctc-kartu">
+      <h4>📷 Foto Invoice</h4>
+      <p>Unggah foto invoice dari HP atau komputer. Sistem membaca tanggal,
+      supplier, nomor invoice, dan nominal secara otomatis. Hasil bacaan
+      ditampilkan lebih dulu untuk diperiksa sebelum disimpan.</p>
+    </div>
 
-**🧾 Upload SAP B1**  
-Unggah berkas export SAP B1. Sistem mencocokkan tiap baris dengan data yang
-sudah ada, lalu mengisi Total Invoice, PPh, No AP Invoice, dan Tanggal Jatuh
-Tempo. Baris yang tidak dapat dipastikan kecocokannya ditandai untuk diperiksa
-manual — tidak ditebak.
-""")
-
-st.divider()
+    <div class="ctc-kartu hijau">
+      <h4>🧾 Upload SAP B1</h4>
+      <p>Unggah berkas export SAP B1. Sistem mencocokkan tiap baris dengan data
+      yang sudah ada, lalu mengisi Total Invoice, PPh, No AP Invoice, dan
+      Tanggal Jatuh Tempo. Baris yang tidak dapat dipastikan kecocokannya
+      ditandai untuk diperiksa manual — tidak ditebak.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.info("Pilih menu di panel sebelah kiri untuk mulai.")
 
