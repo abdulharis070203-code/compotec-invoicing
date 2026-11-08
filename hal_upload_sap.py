@@ -28,8 +28,6 @@ ATURAN PENCOCOKAN (urutan pengecekan):
 """
 
 import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
 import pandas as pd
 import re
 import difflib
@@ -50,16 +48,7 @@ KOL_SAP = {"vendor": "Vendor", "no_ap": "No AP", "doc_total": "Document Total",
 # ================================================================
 # KONEKSI
 # ================================================================
-@st.cache_resource(show_spinner=False)
-def buka_spreadsheet():
-    cred = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    return gspread.authorize(cred).open_by_key(st.secrets["spreadsheet_id"])
-
-def ambil_sheet(nama):
-    return buka_spreadsheet().worksheet(nama)
+from koneksi import ambil_sheet, pesan_ramah, panel_diagnosis
 
 # ================================================================
 # PENCOCOKAN NAMA VENDOR — TOLERAN TAPI AMAN
@@ -175,6 +164,7 @@ def proses_pencocokan(df_sap, data_invoicing):
         hasil_tulis.append((
             baris_target["baris"], target_a,
             wtax_val if wtax_val else None, due_date, no_ap,
+            baris_target.get("kunci", ""),
         ))
         ket_m = f"PPh Rp{wtax_val:,}" if wtax_val else "tanpa PPh"
         log.append((vendor_sap, "BERHASIL",
@@ -201,6 +191,9 @@ def muat_data_invoicing():
         hasil.append({
             "baris": i, "supplier": baris[2].strip(),
             "nominal": nominal, "L": baris[11] if len(baris) > 11 else "",
+            # Kunci Invoice (kolom V) dipakai untuk menemukan kembali
+            # baris ini saat menulis, bila posisinya sudah bergeser.
+            "kunci": (baris[21].strip() if len(baris) > 21 else ""),
         })
     return hasil
 
@@ -208,11 +201,39 @@ def muat_data_invoicing():
 # TULIS HASIL
 # ================================================================
 def tulis_hasil(hasil_tulis):
+    """Menulis L, M, O, P — dengan memeriksa ulang posisi baris lebih dulu.
+
+    Sejak invoice baru disisipkan di PALING ATAS, nomor baris bisa
+    bergeser antara saat data dibaca dan saat ditulis (misalnya ada
+    staff lain menyimpan foto invoice di sela-sela). Menulis ke nomor
+    baris lama berarti menimpa invoice yang keliru. Karena itu posisi
+    tiap baris dicari ulang lewat Kunci Invoice (kolom V) tepat
+    sebelum menulis.
+
+    Mengembalikan: (jumlah_ditulis, daftar_dilewati)
+    """
     ws = ambil_sheet(CFG["SHEET_INVOICE"])
-    for baris, L, M, due_date, no_ap in hasil_tulis:
-        ws.update(f"L{baris}:M{baris}", [[L, M if M else ""]], value_input_option="USER_ENTERED")
-        ws.update(f"O{baris}:P{baris}", [[str(no_ap or ""), due_date or ""]],
+
+    # Peta Kunci Invoice -> nomor baris, dibaca sesaat sebelum menulis.
+    peta = {}
+    for i, nilai in enumerate(ws.col_values(22)[4:], start=5):
+        k = str(nilai).strip()
+        if k:
+            peta.setdefault(k, i)
+
+    ditulis, dilewati = 0, []
+    for baris, L, M, due_date, no_ap, kunci in hasil_tulis:
+        tujuan = peta.get(kunci, baris) if kunci else baris
+        if kunci and kunci not in peta:
+            dilewati.append(f"Kunci {kunci} tidak ditemukan lagi — dilewati")
+            continue
+        # gspread 6 memakai urutan update(values, range_name).
+        ws.update([[L, M if M else ""]], f"L{tujuan}:M{tujuan}",
                   value_input_option="USER_ENTERED")
+        ws.update([[str(no_ap or ""), due_date or ""]], f"O{tujuan}:P{tujuan}",
+                  value_input_option="USER_ENTERED")
+        ditulis += 1
+    return ditulis, dilewati
 
 def tulis_log(log, nama_file, diinput_oleh):
     try:
@@ -288,14 +309,21 @@ if "log" in st.session_state:
             f"Baris berstatus PERLU CEK **tidak** akan ditulis — periksa manual di sheet."
         )
         if st.button(f"💾 Tulis {berhasil} Baris ke File Invoicing", type="primary"):
-            with st.spinner("Menulis..."):
-                tulis_hasil(hasil_tulis)
-                tulis_log(log, st.session_state["nama_file"], nama_penginput)
-            st.success(f"{berhasil} baris berhasil ditulis.")
-            del st.session_state["log"]
-            del st.session_state["hasil_tulis"]
+            try:
+                with st.spinner("Menulis..."):
+                    ditulis, dilewati = tulis_hasil(hasil_tulis)
+                    tulis_log(log, st.session_state["nama_file"], nama_penginput)
+                st.success(f"{ditulis} baris berhasil ditulis.")
+                for pesan in dilewati:
+                    st.warning(pesan)
+                del st.session_state["log"]
+                del st.session_state["hasil_tulis"]
+            except Exception as e:
+                st.error(f"Gagal menulis — {pesan_ramah(e)}")
     else:
         st.info("Tidak ada baris yang bisa ditulis otomatis pada file ini.")
 
 elif berkas and not nama_penginput.strip():
     st.warning("Isi nama Anda terlebih dahulu.")
+
+panel_diagnosis()
