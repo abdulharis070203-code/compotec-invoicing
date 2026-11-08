@@ -18,8 +18,6 @@ ATURAN YANG SUDAH DIUJI DAN DISEPAKATI:
 """
 
 import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
 import google.generativeai as genai
 from datetime import datetime, date
 import json
@@ -33,16 +31,9 @@ CFG = {
 # ================================================================
 # KONEKSI
 # ================================================================
-@st.cache_resource(show_spinner=False)
-def buka_spreadsheet():
-    cred = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    return gspread.authorize(cred).open_by_key(st.secrets["spreadsheet_id"])
-
-def ambil_sheet(nama):
-    return buka_spreadsheet().worksheet(nama)
+# Koneksi Google Sheets dipusatkan di koneksi.py supaya perbaikan
+# cukup dilakukan satu kali untuk semua halaman.
+from koneksi import ambil_sheet, pesan_ramah, panel_diagnosis
 
 # ================================================================
 # PEMBACAAN FOTO — GEMINI VISION
@@ -161,30 +152,73 @@ def valid_tanggal(s):
 # ================================================================
 # PENULISAN KE SHEET
 # ================================================================
-def baris_berikutnya(ws):
-    """No urut berikutnya = baris kosong pertama setelah data terakhir."""
-    kolom_c = ws.col_values(3)  # Supplier
-    for i in range(len(kolom_c) - 1, 3, -1):  # mundur dari akhir, lewati header
-        if kolom_c[i].strip():
-            return i + 2  # baris berikutnya (1-indexed, +1 utk header sudah di col_values)
-    return 5  # sheet baru, mulai dari baris pertama data
+BARIS_DATA = 5   # baris pertama berisi data (4 baris di atasnya judul)
+
+# Rumus Nilai Dibayar (Neto). Memakai ROW() supaya selalu menunjuk
+# barisnya sendiri — penting karena sheet kini diurutkan ulang
+# (terbaru di atas) dan baris bisa berpindah posisi.
+RUMUS_NETO = (
+    '=IFERROR(IF(OR(INDEX($L:$L,ROW())="",INDEX($M:$M,ROW())=""),"",'
+    'INDEX($L:$L,ROW())-INDEX($M:$M,ROW())),"")'
+)
+
+
+def nomor_urut_berikutnya(ws):
+    """No urut tertinggi + 1.
+
+    Tidak lagi dihitung dari posisi baris. Sejak urutan sheet dibalik
+    (tanggal terbaru di paling atas), posisi baris tidak lagi
+    mencerminkan nomor urut.
+    """
+    tertinggi = 0
+    for nilai in ws.col_values(1)[BARIS_DATA - 1:]:
+        teks = str(nilai).strip().replace(".", "").replace(",", "")
+        if teks.isdigit():
+            tertinggi = max(tertinggi, int(teks))
+    return tertinggi + 1
+
+
+def baris_data_pertama(ws):
+    """Baris data teratas.
+
+    Beberapa baris kosong di atasnya adalah baris STANDBY yang
+    disiapkan untuk pengetikan manual oleh Finance. Invoice dari
+    aplikasi disisipkan tepat di bawah zona itu, supaya baris
+    standby tetap utuh di puncak dan siap dipakai.
+    """
+    kolom_c = ws.col_values(3)              # Supplier
+    for i in range(BARIS_DATA - 1, len(kolom_c)):
+        if str(kolom_c[i]).strip():
+            return i + 1                    # col_values dimulai dari baris 1
+    return BARIS_DATA                       # sheet masih kosong
+
 
 def simpan_baris(data, nama_file, diinput_oleh):
     ws = ambil_sheet(CFG["SHEET_INVOICE"])
-    baris = baris_berikutnya(ws)
-    no_urut = baris - 4
+    no_urut = nomor_urut_berikutnya(ws)
+    baris = baris_data_pertama(ws)
 
-    ws.update(f"A{baris}:F{baris}", [[
-        no_urut,
-        data["tanggal_terima"],
-        data["supplier"],
-        str(data["nomor_invoice"]),     # paksa teks — nol depan aman
-        data["nominal"],
-        data.get("mata_uang", "IDR"),
-    ]], value_input_option="USER_ENTERED")
+    # Disisipkan di ATAS data lama, tetapi DI BAWAH baris standby.
+    # inherit_from_before=False membuat baris baru mewarisi format,
+    # garis, dan pilihan tanggal dari baris DI BAWAHNYA — yaitu baris
+    # data teratas sebelumnya. Bila mewarisi dari atas, yang tertiru
+    # bisa jadi baris standby yang masih kosong.
+    ws.insert_rows(
+        [[
+            no_urut,
+            data["tanggal_terima"],
+            data["supplier"],
+            str(data["nomor_invoice"]),     # paksa teks — nol depan aman
+            data["nominal"],
+            data.get("mata_uang", "IDR"),
+        ]],
+        row=baris,
+        value_input_option="USER_ENTERED",
+        inherit_from_before=False,
+    )
 
-    # Nomor Invoice & format lain sudah diformat di level kolom template —
-    # tidak perlu diatur ulang di sini.
+    # Rumus Neto ditulis ulang untuk baris baru ini.
+    ws.update([[RUMUS_NETO]], f"N{baris}", value_input_option="USER_ENTERED")
 
     try:
         log = ambil_sheet(CFG["SHEET_LOG"])
@@ -197,7 +231,7 @@ def simpan_baris(data, nama_file, diinput_oleh):
     except Exception:
         pass  # kegagalan log tidak boleh menggagalkan penyimpanan utama
 
-    return baris
+    return no_urut
 
 # ================================================================
 # TAMPILAN
@@ -289,12 +323,12 @@ if "hasil_baca" in st.session_state:
             "keyakinan": keyakinan,
         }
         try:
-            baris = simpan_baris(final, st.session_state.get("nama_berkas", ""), nama_penginput)
-            st.success(f"Tersimpan di baris {baris}.")
+            no_urut = simpan_baris(final, st.session_state.get("nama_berkas", ""), nama_penginput)
+            st.success(f"Tersimpan sebagai No {no_urut}, di baris paling atas.")
             del st.session_state["hasil_baca"]
             st.balloons()
         except Exception as e:
-            st.error(f"Gagal menyimpan: {e}")
+            st.error(f"Gagal menyimpan — {pesan_ramah(e)}")
 
 elif berkas and not nama_penginput.strip():
     st.warning("Isi nama Anda terlebih dahulu.")
@@ -302,12 +336,20 @@ elif berkas and not nama_penginput.strip():
 # ----------------------------------------------------------------
 # PANEL DIAGNOSIS
 # ----------------------------------------------------------------
-with st.expander("Diagnosis koneksi"):
-    try:
-        daftar = model_tersedia()
-        st.write(f"Model tersedia: **{len(daftar)}**")
-        st.write(f"Dipakai sistem: `{pilih_model()}`")
-        st.code("\n".join(daftar) or "(tidak ada)")
-    except Exception as e:
-        st.error("Daftar model tidak dapat diambil.")
-        st.code(f"{type(e).__name__}: {e}")
+# Pemeriksaan Spreadsheet diletakkan lebih dulu: kegagalan paling
+# sering terjadi di sisi ini.
+panel_diagnosis()
+
+# Pemeriksaan Gemini berjalan HANYA bila tombol ditekan. Sebelumnya
+# daftar model diambil setiap kali halaman dibuka, sehingga halaman
+# tertahan menunggu jaringan sebelum isinya tampil.
+with st.expander("Diagnosis koneksi pembaca foto (Gemini)"):
+    if st.button("Uji pembaca foto sekarang", key="uji_gemini"):
+        try:
+            daftar = model_tersedia()
+            st.success(f"Model tersedia: **{len(daftar)}**")
+            st.write(f"Dipakai sistem: `{pilih_model()}`")
+            st.code("\n".join(daftar) or "(tidak ada)")
+        except Exception as e:
+            st.error("Daftar model tidak dapat diambil.")
+            st.code(f"{type(e).__name__}: {str(e)[:500]}")
