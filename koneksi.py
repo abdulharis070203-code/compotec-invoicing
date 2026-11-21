@@ -110,6 +110,22 @@ def pesan_ramah(e):
             )
         return str(e)
 
+    # gspread 6 melempar PermissionError BAWAAN PYTHON (bukan APIError)
+    # saat Google membalas 403 pada open_by_key. Tanpa cabang ini, pesannya
+    # jatuh ke keranjang terakhir dan pengguna hanya melihat jejak galat.
+    if isinstance(e, PermissionError):
+        return (
+            "Service account ditolak membuka spreadsheet. Dua kemungkinan, "
+            "periksa berurutan:\n\n"
+            f"1. Spreadsheet belum dibagikan ke **{email_layanan()}** "
+            "dengan hak **Editor**. Buka spreadsheet > Share > tempel email itu "
+            "> pilih Editor > Send.\n"
+            "2. Google Sheets API atau Google Drive API belum aktif pada project "
+            "Google Cloud service account ini.\n\n"
+            "Spreadsheet-nya sendiri ADA — kalau ID-nya salah, pesannya akan "
+            "berbunyi 'tidak ditemukan', bukan 'ditolak'."
+        )
+
     if isinstance(e, APIError):
         kode = getattr(e, "code", None)
         pesan = str(e.error.get("message", ""))[:400]

@@ -743,10 +743,20 @@ if berkas and nama_penginput.strip():
                     f"{buang} baris di luar rentang tidak disentuh.")
 
     if st.button("🔍 Cocokkan dengan File Invoicing", type="primary"):
-        with st.spinner("Memuat data File Invoicing..."):
-            data_inv = muat_data_invoicing()
-        with st.spinner("Mencocokkan..."):
-            hasil_tulis, log, temuan, ringkas = proses_pencocokan(df_sap, data_inv)
+        # Dibungkus supaya kegagalan membuka spreadsheet tampil sebagai
+        # satu kalimat yang bisa ditindaklanjuti, bukan jejak galat mentah.
+        try:
+            with st.spinner("Memuat data File Invoicing..."):
+                data_inv = muat_data_invoicing()
+            if not data_inv:
+                st.error("Sheet INV 2026 terbuka tapi tidak ada baris data "
+                         "yang terbaca mulai baris 5. Periksa nama sheet dan isinya.")
+                st.stop()
+            with st.spinner("Mencocokkan..."):
+                hasil_tulis, log, temuan, ringkas = proses_pencocokan(df_sap, data_inv)
+        except Exception as e:
+            st.error(f"Gagal membaca File Invoicing — {pesan_ramah(e)}")
+            st.stop()
         st.session_state.update({"hasil_tulis": hasil_tulis, "log": log,
                                  "temuan": temuan, "ringkas": ringkas,
                                  "nama_file": berkas.name})
