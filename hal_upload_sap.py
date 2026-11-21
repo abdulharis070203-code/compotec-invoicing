@@ -51,6 +51,7 @@ ATURAN PENCOCOKAN
 """
 
 import io
+import time
 import math
 import re
 import difflib
@@ -72,6 +73,7 @@ CFG = {
 KOL_SAP = {"vendor": "Vendor", "no_ap": "No AP", "doc_total": "Document Total",
            "due_date": "Due Date", "wtax": "WTax Amount"}
 
+from gspread.exceptions import APIError
 from koneksi import ambil_sheet, pesan_ramah, panel_diagnosis
 
 
@@ -539,7 +541,32 @@ def muat_data_invoicing():
 # ================================================================
 # TULIS HASIL
 # ================================================================
-def tulis_hasil(hasil_tulis):
+# Satu panggilan batch_update menampung banyak rentang sekaligus.
+# Google membatasi sekitar 60 permintaan TULIS per menit per pengguna;
+# menulis baris per baris (2 permintaan per baris) menabrak batas itu
+# pada sekitar baris ke-30. 50 baris per kelompok = 1 permintaan per 50
+# baris, sehingga 170 baris cukup 4 permintaan.
+BARIS_PER_KELOMPOK = 50
+JEDA_ULANG = [5, 15, 30, 60]      # detik, bila Google tetap menolak
+
+
+def kirim_kelompok(ws, permintaan):
+    """Kirim satu kelompok rentang; ulangi dengan jeda bila kena 429."""
+    galat = None
+    for ke, jeda in enumerate([0] + JEDA_ULANG):
+        if jeda:
+            time.sleep(jeda)
+        try:
+            ws.batch_update(permintaan, value_input_option="USER_ENTERED")
+            return
+        except APIError as e:
+            if getattr(e, "code", None) not in (429, 503):
+                raise
+            galat = e
+    raise galat
+
+
+def tulis_hasil(hasil_tulis, lapor=None):
     """Menulis L, M, O, P — dengan memeriksa ulang posisi baris lebih dulu.
 
     Sejak invoice baru disisipkan di atas, nomor baris bisa bergeser
@@ -557,18 +584,40 @@ def tulis_hasil(hasil_tulis):
         if k:
             peta.setdefault(k, i)
 
-    ditulis, dilewati = 0, []
+    # Satu baris = dua rentang (L:M dan O:P). Keduanya TIDAK digabung jadi
+    # L:P karena kolom N (Nilai Dibayar Neto) diisi rumus dan tidak boleh
+    # tertimpa.
+    dilewati = []
+    satuan = []          # [(rentang_LM, nilai_LM, rentang_OP, nilai_OP)]
     for baris, L, M, due_date, no_ap, kunci in hasil_tulis:
         tujuan = peta.get(kunci, baris) if kunci else baris
         if kunci and kunci not in peta:
             dilewati.append(f"Kunci {kunci} tidak ditemukan lagi di sheet — dilewati")
             continue
-        # gspread 6 memakai urutan update(values, range_name).
-        ws.update([[L, M if M else ""]], f"L{tujuan}:M{tujuan}",
-                  value_input_option="USER_ENTERED")
-        ws.update([[ke_teks(no_ap), due_date or ""]], f"O{tujuan}:P{tujuan}",
-                  value_input_option="USER_ENTERED")
-        ditulis += 1
+        satuan.append((
+            {"range": f"L{tujuan}:M{tujuan}", "values": [[L, M if M else ""]]},
+            {"range": f"O{tujuan}:P{tujuan}", "values": [[ke_teks(no_ap), due_date or ""]]},
+        ))
+
+    ditulis = 0
+    for i in range(0, len(satuan), BARIS_PER_KELOMPOK):
+        kelompok = satuan[i:i + BARIS_PER_KELOMPOK]
+        permintaan = [r for pasang in kelompok for r in pasang]
+        try:
+            kirim_kelompok(ws, permintaan)
+        except Exception as e:
+            # Sebagian sudah tertulis. Beri tahu apa adanya, jangan
+            # mengaku seluruhnya gagal — baris yang terisi tidak akan
+            # ditimpa saat dijalankan ulang.
+            raise RuntimeError(
+                f"{ditulis} baris berhasil ditulis, lalu terhenti. "
+                f"{len(satuan) - ditulis} baris belum ditulis. "
+                f"Jalankan lagi — baris yang sudah terisi otomatis dilewati. "
+                f"Penyebab: {e}"
+            ) from e
+        ditulis += len(kelompok)
+        if lapor:
+            lapor(ditulis, len(satuan))
     return ditulis, dilewati
 
 
@@ -825,7 +874,14 @@ if "log" in st.session_state:
         if st.button(f"💾 Tulis {ringkas['ditulis']} Baris ke File Invoicing", type="primary"):
             try:
                 with st.spinner("Menulis..."):
-                    ditulis, gagal = tulis_hasil(hasil_tulis)
+                    bar = st.progress(0.0, text="Menulis...")
+
+                    def lapor(sudah, total):
+                        bar.progress(sudah / total,
+                                     text=f"Menulis {sudah} dari {total} baris...")
+
+                    ditulis, gagal = tulis_hasil(hasil_tulis, lapor=lapor)
+                    bar.empty()
                     tulis_log(log, st.session_state["nama_file"], nama_penginput)
                 st.success(f"{ditulis} baris berhasil ditulis.")
                 for pesan in gagal:
