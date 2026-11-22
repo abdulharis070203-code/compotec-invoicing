@@ -249,16 +249,37 @@ def baca_berkas_sap(berkas):
         return peta
 
     def petakan_opsional(df, sudah):
-        """Kolom tambahan yang boleh tidak ada. Dicari dari sisa kolom saja,
-        supaya tidak pernah merebut kolom yang sudah dipakai kolom wajib."""
-        sisa = [c for c in df.columns if c not in sudah]
-        hasil = {}
-        for baku in KOL_SAP_OPSIONAL.values():
-            calon = [c for c in sisa if baku.lower() in c.lower()]
-            if len(calon) == 1:
-                hasil[baku] = calon[0]
-                sisa.remove(calon[0])
-        return hasil
+        """Cari kolom nomor dokumen AP — yang isinya 372601777 dan sejenisnya.
+
+        Ekspor SAP polos memberi DUA kolom berjudul "#": yang pertama nomor
+        urut baris (1, 2, 3, ...), yang kedua nomor dokumen AP. pandas
+        menamainya "#" dan "#.1". Judulnya sama persis, jadi nama kolom
+        TIDAK cukup untuk membedakan — isinya yang diperiksa.
+
+        Nomor dokumen AP berupa angka panjang (7 digit atau lebih);
+        nomor urut baris tidak. Kolom hanya diterima bila minimal 80%
+        isinya berpola itu, supaya tidak asal menebak.
+        """
+        terbaik, skor_terbaik = None, 0.0
+        for c in df.columns:
+            if c in sudah:
+                continue
+            judul = re.sub(r"\.\d+$", "", str(c)).strip().lower()
+            if judul != "#" and "no ap invoice" not in judul:
+                continue
+            nilai = []
+            for v in df[c].tolist():
+                t = re.sub(r"\.0$", "", str(v).strip())
+                if t and t.lower() != "nan":
+                    nilai.append(t)
+            if not nilai:
+                continue
+            skor = sum(1 for v in nilai if re.fullmatch(r"\d{7,}", v)) / len(nilai)
+            if skor > skor_terbaik:
+                terbaik, skor_terbaik = c, skor
+        if terbaik is not None and skor_terbaik >= 0.8:
+            return {KOL_SAP_OPSIONAL["no_ap_dok"]: terbaik}
+        return {}
 
     percobaan = [
         ("Excel", lambda b: pd.read_excel(b, dtype=str)),
