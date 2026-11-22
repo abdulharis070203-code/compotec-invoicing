@@ -82,6 +82,26 @@ KOL_SAP = {"vendor": "Vendor", "no_ap": "No AP", "doc_total": "Document Total",
 KOL_SAP_OPSIONAL = {"no_ap_dok": "No Ap Invoice"}
 
 
+def unikkan_kolom(judul):
+    """Pastikan tidak ada nama kolom kembar.
+
+    Ekspor SAP punya DUA kolom berjudul "#". Sebagian pembaca membubuhi
+    akhiran sendiri (".1"), sebagian tidak. Bila dibiarkan kembar,
+    df["#"] mengembalikan DataFrame alih-alih Series dan kode yang
+    membaca isinya pecah ("'DataFrame' object has no attribute 'tolist'").
+    Di sini akhiran dibubuhkan sendiri, mengikuti kebiasaan pandas.
+    """
+    hitung, keluar = {}, []
+    for j in judul:
+        if j in hitung:
+            hitung[j] += 1
+            keluar.append(f"{j}.{hitung[j]}")
+        else:
+            hitung[j] = 0
+            keluar.append(j)
+    return keluar
+
+
 def pilih_no_ap(no_ap_dok, no_ap_vendor):
     """Nilai untuk kolom O spreadsheet.
 
@@ -261,14 +281,16 @@ def baca_berkas_sap(berkas):
         isinya berpola itu, supaya tidak asal menebak.
         """
         terbaik, skor_terbaik = None, 0.0
-        for c in df.columns:
+        for posisi, c in enumerate(df.columns):
             if c in sudah:
                 continue
             judul = re.sub(r"\.\d+$", "", str(c)).strip().lower()
             if judul != "#" and "no ap invoice" not in judul:
                 continue
+            # Diambil lewat POSISI, bukan nama — supaya tetap aman
+            # seandainya masih ada nama kolom yang kembar.
             nilai = []
-            for v in df[c].tolist():
+            for v in df.iloc[:, posisi].tolist():
                 t = re.sub(r"\.0$", "", str(v).strip())
                 if t and t.lower() != "nan":
                     nilai.append(t)
@@ -299,7 +321,7 @@ def baca_berkas_sap(berkas):
         except Exception as e:
             kegagalan.append(f"{nama}: {type(e).__name__}")
             continue
-        df.columns = [str(c).strip() for c in df.columns]
+        df.columns = unikkan_kolom([str(c).strip() for c in df.columns])
         peta = petakan(df)
         if len(peta) == len(perlu):
             # seragamkan jadi judul baku supaya sisa kode tidak perlu tahu
