@@ -102,6 +102,23 @@ def unikkan_kolom(judul):
     return keluar
 
 
+def kunci_baris(kunci_tersimpan, nomor_invoice):
+    """Kunci pengenal satu baris spreadsheet.
+
+    Kolom V (Kunci Invoice) belum tentu terisi — baris yang ditambahkan
+    lewat skrip atau diketik manual sering kosong. Bila kosong, kunci
+    dihitung dari Nomor Invoice (kolom D).
+
+    WAJIB dipakai baik saat MEMBACA (muat_data_invoicing) maupun saat
+    MENULIS (tulis_hasil). Pernah terjadi keduanya memakai cara berbeda:
+    pencocokan memakai kunci hitungan, penulisan hanya melihat kolom V,
+    akibatnya seluruh baris ditolak dengan "Kunci ... tidak ditemukan
+    lagi di sheet" dan nol baris tertulis.
+    """
+    k = str(kunci_tersimpan or "").strip()
+    return k if k else kunci_invoice(nomor_invoice)
+
+
 def pilih_no_ap(no_ap_dok, no_ap_vendor):
     """Nilai untuk kolom O spreadsheet.
 
@@ -394,6 +411,75 @@ class PencariVendor:
         return None  # tidak ada atau ambigu
 
 
+def rencana_bertahap(df_sap, by_kunci):
+    """Tentukan No AP mana yang dipakai bila satu nomor invoice punya banyak.
+
+    Satu nomor invoice dengan beberapa No AP berarti pembayaran bertahap.
+    Aturannya satu nomor invoice dipasangkan dengan satu No AP:
+
+      * Bila ada AP yang Document Total-nya SAMA PERSIS dengan nominal
+        invoice di spreadsheet, AP itulah yang dipakai. Tahap lain
+        diabaikan, bukan ditulis menimpa.
+      * Bila tidak ada yang sama, seluruh AP tahap itu DIJUMLAHKAN dan
+        ditulis sebagai satu nilai pada AP bernomor paling awal.
+
+    Mengembalikan (indeks_yang_dilewati, {indeks: nilai_gabungan}).
+    """
+    kelompok = defaultdict(list)
+    for i, r in df_sap.iterrows():
+        noap = ke_teks(r.get(KOL_SAP["no_ap"]))
+        if not noap or notasi_ilmiah(noap):
+            continue
+        total = ke_angka(r.get(KOL_SAP["doc_total"]))
+        if total is None or total <= 0:
+            continue
+        kelompok[kunci_invoice(noap)].append(
+            (i, total, ke_angka(r.get(KOL_SAP["wtax"])) or 0,
+             ke_tanggal(r.get(KOL_SAP["due_date"])),
+             ke_teks(r.get(KOL_SAP_OPSIONAL["no_ap_dok"])) or noap))
+
+    lewati, ganti = set(), {}
+    for k, anggota in kelompok.items():
+        if len(anggota) < 2:
+            continue
+        baris = [d for d in by_kunci.get(k, []) if not str(d["L"]).strip()]
+        if not baris:
+            continue                      # tidak ada barisnya — jalur biasa
+
+        # AP diurutkan dari nomor dokumen paling awal supaya hasilnya
+        # selalu sama bila diulang.
+        sisa = sorted(anggota, key=lambda a: (str(a[4]), a[0]))
+
+        for d in baris:                   # satu baris spreadsheet = satu AP
+            nominal = d["nominal"]
+            pas = None
+            if isinstance(nominal, (int, float)):
+                for a in sisa:
+                    if round(a[1]) in (round(nominal), round(nominal + a[2])):
+                        pas = a
+                        break
+            if pas is not None:
+                sisa.remove(pas)          # dipakai apa adanya
+                continue
+            if not sisa:
+                break
+            # tidak ada yang sama -> jumlahkan seluruh tahap tersisa
+            induk = sisa[0]
+            jatuh = [a[3] for a in sisa if a[3]]
+            ganti[induk[0]] = {"total": sum(a[1] for a in sisa),
+                               "wtax": sum(a[2] for a in sisa),
+                               "due": min(jatuh) if jatuh else None,
+                               "jumlah_tahap": len(sisa)}
+            for a in sisa[1:]:
+                lewati.add(a[0])
+            sisa = []
+            break
+
+        for a in sisa:                    # tahap lebih yang tidak terpakai
+            lewati.add(a[0])
+    return lewati, ganti
+
+
 # ================================================================
 # MESIN PENCOCOKAN
 # ================================================================
@@ -416,7 +502,8 @@ def proses_pencocokan(df_sap, data_invoicing):
     hasil_tulis = []
     log = []
     temuan = {"selisih": [], "vendor_baru": [], "invoice_belum_dicatat": [],
-              "noap_rusak": [], "total_nol": [], "ambigu": []}
+              "noap_rusak": [], "total_nol": [], "ambigu": [],
+              "bertahap": []}
     dipakai = set()
     sisa = []
     terjangkau = 0
@@ -424,8 +511,19 @@ def proses_pencocokan(df_sap, data_invoicing):
     def catat(vendor, status, ket):
         log.append((vendor, status, ket))
 
+    # ---------- rencana untuk nomor invoice ber-No AP banyak ----------
+    # Aturan dari pengguna: satu nomor invoice dipasangkan dengan satu
+    # No AP. Bila satu nomor invoice punya beberapa tahap pembayaran:
+    #   1. pakai AP yang Document Total-nya SAMA dengan nominal invoice
+    #      di spreadsheet, tahap lain diabaikan;
+    #   2. bila tidak ada yang sama, JUMLAHKAN total seluruh AP tahap itu
+    #      dan tulis sebagai satu nilai.
+    lewati_idx, ganti_idx = rencana_bertahap(df_sap, by_kunci)
+
     # ---------------- TINGKAT 1 — nomor invoice ----------------
-    for _, r in df_sap.iterrows():
+    for _idx, r in df_sap.iterrows():
+        if _idx in lewati_idx:
+            continue                      # tahap lain, sengaja diabaikan
         vendor = ke_teks(r.get(KOL_SAP["vendor"]))
         noap_asli = ke_teks(r.get(KOL_SAP["no_ap"]))
         # nomor dokumen AP yang akan ditulis ke kolom O; bila kolom itu
@@ -434,6 +532,12 @@ def proses_pencocokan(df_sap, data_invoicing):
         total = ke_angka(r.get(KOL_SAP["doc_total"]))
         wtax = ke_angka(r.get(KOL_SAP["wtax"])) or 0
         due = ke_tanggal(r.get(KOL_SAP["due_date"]))
+
+        gabung = ganti_idx.get(_idx)
+        if gabung:                        # beberapa tahap dijumlahkan
+            total = gabung["total"]
+            wtax = gabung["wtax"]
+            due = gabung["due"] or due
 
         baris_sap = {"vendor": vendor, "noap": noap_asli, "noap_dok": noap_dok,
                      "total": total, "wtax": wtax, "due": due}
@@ -481,6 +585,14 @@ def proses_pencocokan(df_sap, data_invoicing):
             catat(vendor, "DILEWATI", f"No {d['no']} sudah terisi")
             continue
 
+        if d["baris"] in dipakai:
+            # Pengaman terakhir: baris ini sudah dipasangkan pada proses
+            # yang sama. Tidak boleh ditimpa. Kasus pembayaran bertahap
+            # sudah diurus lebih dulu oleh rencana_bertahap().
+            catat(vendor, "DILEWATI",
+                  f"No {d['no']} sudah dipasangkan dengan No AP lain")
+            continue
+
         nominal_cocok = (isinstance(d["nominal"], (int, float))
                          and round(d["nominal"]) in (round(total), round(total - wtax)))
         nama_cocok = kunci_nama(vendor) == kunci_nama(d["supplier"])
@@ -509,9 +621,19 @@ def proses_pencocokan(df_sap, data_invoicing):
                             round(wtax) if wtax else None, due, no_ap_tulis, d["kunci"]))
         dipakai.add(d["baris"])
 
+        if gabung:
+            temuan["bertahap"].append({
+                **baris_sap, "no_urut": d["no"], "supplier_sheet": d["supplier"],
+                "nominal_sheet": d["nominal"], "jumlah_tahap": gabung["jumlah_tahap"],
+                "sebab": f"Tidak ada satu No AP yang nilainya sama dengan nominal "
+                         f"invoice, jadi {gabung['jumlah_tahap']} tahap dijumlahkan "
+                         f"menjadi Rp{round(total):,}"})
+
         if nominal_cocok:
+            tahap = (f" | {gabung['jumlah_tahap']} tahap dijumlahkan" if gabung else "")
             ket_m = f"PPh Rp{round(wtax):,}" if wtax else "tanpa PPh"
-            catat(vendor, "BERHASIL", f"No {d['no']} | Total Rp{round(total):,} | {ket_m}")
+            catat(vendor, "BERHASIL",
+                  f"No {d['no']} | Total Rp{round(total):,} | {ket_m}{tahap}")
         else:
             selisih = d["nominal"] - total
             temuan["selisih"].append({
@@ -612,9 +734,8 @@ def muat_data_invoicing():
         nominal = ke_angka(baris[4]) if baris[4] else None
         # Kunci Invoice diambil dari kolom V; bila kosong, dihitung
         # ulang dari kolom D supaya baris lama tetap bisa dicocokkan.
-        kunci = (baris[21].strip() if len(baris) > 21 else "")
-        if not kunci:
-            kunci = kunci_invoice(baris[3] if len(baris) > 3 else "")
+        kunci = kunci_baris(baris[21] if len(baris) > 21 else "",
+                            baris[3] if len(baris) > 3 else "")
         hasil.append({
             "baris": i,
             "no": ke_teks(baris[0]) or i - 4,
@@ -666,11 +787,16 @@ def tulis_hasil(hasil_tulis, lapor=None):
     """
     ws = ambil_sheet(CFG["SHEET_INVOICE"])
 
+    # Kunci dibangun dengan cara yang SAMA PERSIS seperti saat membaca,
+    # termasuk cadangan dari kolom D bila kolom V kosong.
+    kol_v = ws.col_values(22)[4:]      # V Kunci Invoice
+    kol_d = ws.col_values(4)[4:]       # D Nomor Invoice
     peta = {}
-    for i, nilai in enumerate(ws.col_values(22)[4:], start=5):
-        k = str(nilai).strip()
+    for i in range(max(len(kol_v), len(kol_d))):
+        k = kunci_baris(kol_v[i] if i < len(kol_v) else "",
+                        kol_d[i] if i < len(kol_d) else "")
         if k:
-            peta.setdefault(k, i)
+            peta.setdefault(k, 5 + i)
 
     # Satu baris = dua rentang (L:M dan O:P). Keduanya TIDAK digabung jadi
     # L:P karena kolom N (Nilai Dibayar Neto) diisi rumus dan tidak boleh
@@ -758,6 +884,13 @@ def berkas_periksa(temuan):
         ("Ambigu", "ambigu",
          ["Vendor SAP", "Nomor Invoice", "Document Total", "Keterangan"],
          lambda t: [t.get("vendor", ""), t.get("noap", ""), t.get("total", ""), t.get("sebab", "")]),
+        ("Pembayaran Bertahap", "bertahap",
+         ["No Urut", "Supplier (sheet)", "Nomor Invoice", "No AP dipakai",
+          "Nominal Sheet", "Total Gabungan", "Jumlah Tahap", "Keterangan"],
+         lambda t: [t.get("no_urut", ""), t.get("supplier_sheet", ""), t.get("noap", ""),
+                    t.get("noap_dok", "") or t.get("noap", ""),
+                    t.get("nominal_sheet", ""), t.get("total", ""),
+                    t.get("jumlah_tahap", ""), t.get("sebab", "")]),
     ]
 
     wb = Workbook()
@@ -931,6 +1064,7 @@ if "log" in st.session_state:
         "noap_rusak": "No AP rusak atau kosong di ekspor SAP",
         "total_nol": "Document Total bernilai nol",
         "ambigu": "Ambigu — sengaja tidak ditebak",
+        "bertahap": "Pembayaran bertahap — beberapa No AP dijumlahkan",
     }
     for kunci, judul in judul_temuan.items():
         isi = temuan.get(kunci, [])
