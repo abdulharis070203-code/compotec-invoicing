@@ -73,6 +73,31 @@ CFG = {
 KOL_SAP = {"vendor": "Vendor", "no_ap": "No AP", "doc_total": "Document Total",
            "due_date": "Due Date", "wtax": "WTax Amount"}
 
+# Kolom OPSIONAL. Kolom "No AP" (E) sebenarnya berisi nomor invoice VENDOR
+# (AR-260900001, 401/2026, ...) dan dipakai untuk MENCOCOKKAN dengan kolom D
+# spreadsheet. Nomor dokumen AP milik SAP ada di kolom lain (372601753, ...)
+# yang judulnya memuat "No Ap Invoice". Itulah yang semestinya masuk ke
+# kolom O spreadsheet. Bila kolom itu tidak ada di ekspor, sistem kembali
+# memakai "No AP" seperti sebelumnya dan memberi tahu di layar.
+KOL_SAP_OPSIONAL = {"no_ap_dok": "No Ap Invoice"}
+
+
+def pilih_no_ap(no_ap_dok, no_ap_vendor):
+    """Nilai untuk kolom O spreadsheet.
+
+    Utamakan nomor dokumen AP dari SAP. Bila tidak ada atau rusak notasi
+    ilmiah, kembali ke nomor invoice vendor; bila itu pun rusak, kosongkan
+    daripada menulis angka yang salah.
+
+    Dipakai Tingkat 1 DAN Tingkat 2 — jangan menyalin aturannya ke tempat
+    lain, karena pernah terjadi kedua tingkat menulis nilai berbeda.
+    """
+    if no_ap_dok and not notasi_ilmiah(no_ap_dok):
+        return no_ap_dok
+    if no_ap_vendor and not notasi_ilmiah(no_ap_vendor):
+        return no_ap_vendor
+    return ""
+
 from gspread.exceptions import APIError
 from koneksi import ambil_sheet, pesan_ramah, panel_diagnosis
 
@@ -223,6 +248,18 @@ def baca_berkas_sap(berkas):
                 sisa.remove(calon[0])
         return peta
 
+    def petakan_opsional(df, sudah):
+        """Kolom tambahan yang boleh tidak ada. Dicari dari sisa kolom saja,
+        supaya tidak pernah merebut kolom yang sudah dipakai kolom wajib."""
+        sisa = [c for c in df.columns if c not in sudah]
+        hasil = {}
+        for baku in KOL_SAP_OPSIONAL.values():
+            calon = [c for c in sisa if baku.lower() in c.lower()]
+            if len(calon) == 1:
+                hasil[baku] = calon[0]
+                sisa.remove(calon[0])
+        return hasil
+
     percobaan = [
         ("Excel", lambda b: pd.read_excel(b, dtype=str)),
         ("teks bertabulasi UTF-16", lambda b: pd.read_csv(b, sep="\t", encoding="utf-16", dtype=str)),
@@ -246,9 +283,13 @@ def baca_berkas_sap(berkas):
         if len(peta) == len(perlu):
             # seragamkan jadi judul baku supaya sisa kode tidak perlu tahu
             ubah = {asli: baku for baku, asli in peta.items() if asli != baku}
+            ops = petakan_opsional(df, set(peta.values()))
+            ubah.update({asli: baku for baku, asli in ops.items() if asli != baku})
             if ubah:
                 df = df.rename(columns=ubah)
                 nama += f" ({len(ubah)} judul beranotasi dikenali)"
+            if KOL_SAP_OPSIONAL["no_ap_dok"] in df.columns:
+                nama += " + kolom No Ap Invoice dipakai untuk kolom O"
             return df, nama
         hilang = sorted(perlu - set(peta))
         kegagalan.append(f"{nama}: terbaca tapi kolom tidak lengkap — "
@@ -344,12 +385,15 @@ def proses_pencocokan(df_sap, data_invoicing):
     for _, r in df_sap.iterrows():
         vendor = ke_teks(r.get(KOL_SAP["vendor"]))
         noap_asli = ke_teks(r.get(KOL_SAP["no_ap"]))
+        # nomor dokumen AP yang akan ditulis ke kolom O; bila kolom itu
+        # tidak ada, kembali memakai nomor invoice vendor seperti dulu
+        noap_dok = ke_teks(r.get(KOL_SAP_OPSIONAL["no_ap_dok"])) or noap_asli
         total = ke_angka(r.get(KOL_SAP["doc_total"]))
         wtax = ke_angka(r.get(KOL_SAP["wtax"])) or 0
         due = ke_tanggal(r.get(KOL_SAP["due_date"]))
 
-        baris_sap = {"vendor": vendor, "noap": noap_asli, "total": total,
-                     "wtax": wtax, "due": due}
+        baris_sap = {"vendor": vendor, "noap": noap_asli, "noap_dok": noap_dok,
+                     "total": total, "wtax": wtax, "due": due}
 
         if total is None or total <= 0:
             temuan["total_nol"].append({**baris_sap, "sebab": "Document Total nol atau bukan angka"})
@@ -417,7 +461,7 @@ def proses_pencocokan(df_sap, data_invoicing):
                   f"berbeda — ditahan")
             continue
 
-        no_ap_tulis = "" if rusak else noap_asli
+        no_ap_tulis = pilih_no_ap(noap_dok, noap_asli)
         hasil_tulis.append((d["baris"], round(total),
                             round(wtax) if wtax else None, due, no_ap_tulis, d["kunci"]))
         dipakai.add(d["baris"])
@@ -491,7 +535,8 @@ def proses_pencocokan(df_sap, data_invoicing):
 
         rusak = notasi_ilmiah(b["noap"])
         hasil_tulis.append((d["baris"], target_a, wtax_val if wtax_val else None,
-                            b["due"], "" if rusak else b["noap"], d["kunci"]))
+                            b["due"], pilih_no_ap(b.get("noap_dok"), b["noap"]),
+                            d["kunci"]))
         dipakai.add(d["baris"])
         ket_m = f"PPh Rp{wtax_val:,}" if wtax_val else "tanpa PPh"
         tanda = " (No AP tidak terpakai — rusak di ekspor SAP)" if rusak else ""
